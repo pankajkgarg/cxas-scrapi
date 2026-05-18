@@ -486,6 +486,12 @@ def combined_evals_report_cmd(args: argparse.Namespace) -> None:
 
     sim_parallel = getattr(args, "sim_parallel", 5)
     golden_timeout = getattr(args, "golden_timeout", 600)
+    sim_scenario_gap = getattr(args, "sim_scenario_gap", 0.0)
+    sim_turn_gap = getattr(args, "sim_turn_gap", 0.0)
+    sim_max_request_attempts = getattr(args, "sim_max_request_attempts", None)
+    sim_retry_delay_base = getattr(args, "sim_retry_delay_base", None)
+    sim_scenario_attempts = getattr(args, "sim_scenario_attempts", 1)
+    sim_scenario_retry_gap = getattr(args, "sim_scenario_retry_gap", 0.0)
 
     generate_combined_report_from_dir(
         output_dir=args.output_dir,
@@ -505,6 +511,12 @@ def combined_evals_report_cmd(args: argparse.Namespace) -> None:
         filter_tags=filter_tags_list,
         parallel=sim_parallel,
         golden_timeout=golden_timeout,
+        scenario_gap_s=sim_scenario_gap,
+        turn_gap_s=sim_turn_gap,
+        max_request_attempts=sim_max_request_attempts,
+        retry_delay_base_s=sim_retry_delay_base,
+        scenario_max_attempts=sim_scenario_attempts,
+        scenario_retry_gap_s=sim_scenario_retry_gap,
     )
     print(f"Combined report generated at {output_path}")
 
@@ -1031,6 +1043,53 @@ def get_parser() -> argparse.ArgumentParser:
         help=(
             "Number of parallel worker sessions for simulations. Defaults to 5."
         ),
+    )
+    parser_report.add_argument(
+        "--sim-scenario-gap",
+        type=float,
+        default=0.0,
+        help=(
+            "Seconds to wait between simulation scenarios. With parallel > 1, "
+            "scenario starts are staggered by this amount."
+        ),
+    )
+    parser_report.add_argument(
+        "--sim-turn-gap",
+        type=float,
+        default=0.0,
+        help=(
+            "Seconds to wait before the second and later turns in simulations."
+        ),
+    )
+    parser_report.add_argument(
+        "--sim-max-request-attempts",
+        type=int,
+        default=None,
+        help=(
+            "Attempts per Sessions API request before a simulation turn fails. "
+            "Defaults to SimulationEvals.max_retries."
+        ),
+    )
+    parser_report.add_argument(
+        "--sim-retry-delay-base",
+        type=float,
+        default=None,
+        help=(
+            "Exponential backoff base between Sessions API request attempts. "
+            "The first retry waits base**0 seconds."
+        ),
+    )
+    parser_report.add_argument(
+        "--sim-scenario-attempts",
+        type=int,
+        default=1,
+        help="Attempts for each full simulation scenario. Defaults to 1.",
+    )
+    parser_report.add_argument(
+        "--sim-scenario-retry-gap",
+        type=float,
+        default=0.0,
+        help="Seconds to wait before retrying a failed simulation scenario.",
     )
     parser_report.add_argument(
         "--modality",

@@ -51,6 +51,31 @@ report = conversation.generate_report()
 print(report)  # Colorized in terminal, styled HTML in Jupyter
 ```
 
+## Rate-limit controls
+
+For slower audio agents or quota-sensitive projects, run simulations with
+explicit pacing and retries:
+
+```python
+results = sim.run_simulations(
+    [test_case],
+    runs=1,
+    parallel=1,
+    modality="audio",
+    scenario_gap_s=120,
+    turn_gap_s=10,
+    max_request_attempts=4,
+    retry_delay_base_s=3,
+    scenario_max_attempts=2,
+    scenario_retry_gap_s=60,
+)
+```
+
+`scenario_gap_s` waits between simulation jobs. `turn_gap_s` waits before
+second and later user turns. Request attempts retry individual Sessions API
+calls with exponential backoff; scenario attempts retry the whole simulation
+job after request retries are exhausted.
+
 ## Reference
 
 ::: cxas_scrapi.evals.simulation_evals.SimulationEvals

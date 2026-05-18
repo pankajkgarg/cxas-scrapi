@@ -1328,6 +1328,12 @@ def generate_combined_report_from_dir(
     filter_tags=None,
     parallel=1,
     golden_timeout=600,
+    scenario_gap_s=0.0,
+    turn_gap_s=0.0,
+    max_request_attempts=None,
+    retry_delay_base_s=None,
+    scenario_max_attempts=1,
+    scenario_retry_gap_s=0.0,
 ):
     """Load results from directory and generate combined HTML report."""
     if not os.path.isdir(output_dir):
@@ -1356,6 +1362,12 @@ def generate_combined_report_from_dir(
             parallel=parallel,
             golden_timeout=golden_timeout,
             include=include,
+            scenario_gap_s=scenario_gap_s,
+            turn_gap_s=turn_gap_s,
+            max_request_attempts=max_request_attempts,
+            retry_delay_base_s=retry_delay_base_s,
+            scenario_max_attempts=scenario_max_attempts,
+            scenario_retry_gap_s=scenario_retry_gap_s,
         )
         sim_results = run_results["simulation"] if "sims" in include else []
         # Map tool results to expected format if needed
@@ -1498,6 +1510,12 @@ def run_all_evals(
     parallel=1,
     golden_timeout=600,
     include=None,
+    scenario_gap_s=0.0,
+    turn_gap_s=0.0,
+    max_request_attempts=None,
+    retry_delay_base_s=None,
+    scenario_max_attempts=1,
+    scenario_retry_gap_s=0.0,
 ):
     """Runs all 4 types of evaluations and returns aggregated results.
 
@@ -1667,6 +1685,12 @@ def run_all_evals(
                         runs=runs,
                         parallel=parallel,
                         modality=modality,
+                        scenario_gap_s=scenario_gap_s,
+                        turn_gap_s=turn_gap_s,
+                        max_request_attempts=max_request_attempts,
+                        retry_delay_base_s=retry_delay_base_s,
+                        scenario_max_attempts=scenario_max_attempts,
+                        scenario_retry_gap_s=scenario_retry_gap_s,
                     )
                     results["simulation"] = sim_results
                     if output_dir:

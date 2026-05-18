@@ -145,6 +145,25 @@ echo "Simulation evals passed"
 echo "All evaluations passed!"
 ```
 
+For quota-sensitive audio simulation runs through `cxas evals report --run`,
+pace scenarios and turns directly from the CLI:
+
+```bash
+cxas evals report \
+  --output-dir eval-reports \
+  --app-name "$APP" \
+  --run \
+  --include sims \
+  --modality audio \
+  --sim-parallel 1 \
+  --sim-scenario-gap 120 \
+  --sim-turn-gap 10 \
+  --sim-max-request-attempts 4 \
+  --sim-retry-delay-base 3 \
+  --sim-scenario-attempts 2 \
+  --sim-scenario-retry-gap 60
+```
+
 ---
 
 ## GitHub Actions integration

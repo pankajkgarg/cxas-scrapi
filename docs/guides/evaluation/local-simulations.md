@@ -158,6 +158,32 @@ with concurrent.futures.ThreadPoolExecutor(max_workers=5) as executor:
 !!! tip "Parallel execution and rate limits"
     The Sessions API and Gemini both have rate limits. Start with `max_workers=3` and increase if you're not hitting errors. The skills system's Run skill handles this automatically.
 
+### Pacing quota-sensitive runs
+
+Use the built-in rate-limit controls when running audio simulations or small
+smoke suites against constrained quota:
+
+```python
+results = sim_evals.run_simulations(
+    test_cases,
+    runs=1,
+    parallel=1,
+    modality="audio",
+    scenario_gap_s=120,
+    turn_gap_s=10,
+    max_request_attempts=4,
+    retry_delay_base_s=3,
+    scenario_max_attempts=2,
+    scenario_retry_gap_s=60,
+)
+```
+
+`scenario_gap_s` spaces out scenarios, while `turn_gap_s` spaces out turns
+inside a conversation. `max_request_attempts` and `retry_delay_base_s` control
+per-turn Sessions API retries; `scenario_max_attempts` and
+`scenario_retry_gap_s` retry a whole scenario if those request attempts still
+fail.
+
 ---
 
 ## Audio modality

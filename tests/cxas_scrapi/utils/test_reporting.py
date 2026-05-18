@@ -661,6 +661,12 @@ def test_run_all_evals_dict_based_simulations(
         runs=1,
         parallel=1,
         modality="text",
+        scenario_gap_s=0.0,
+        turn_gap_s=0.0,
+        max_request_attempts=None,
+        retry_delay_base_s=None,
+        scenario_max_attempts=1,
+        scenario_retry_gap_s=0.0,
     )
 
 

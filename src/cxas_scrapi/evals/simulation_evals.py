@@ -481,12 +481,25 @@ class SimulationEvals(Apps):
         variables: Dict[str, Any],
         modality: str,
         console_logging: bool,
+        max_request_attempts: int | None = None,
+        retry_delay_base_s: float | None = None,
     ) -> Any:
         """Sends a request to the CES Agent with exponential backoff for
         transient errors.
         """
         response = None
-        for attempt in range(self.max_retries):
+        attempts = (
+            max_request_attempts
+            if max_request_attempts is not None
+            else self.max_retries
+        )
+        attempts = max(int(attempts), 1)
+        delay_base = (
+            retry_delay_base_s
+            if retry_delay_base_s is not None
+            else self.retry_delay_base
+        )
+        for attempt in range(attempts):
             try:
                 if user_utterance.startswith("event:"):
                     response = self.sessions_client.run(
@@ -511,16 +524,28 @@ class SimulationEvals(Apps):
                     )
                 break
             except Exception as e:
-                if attempt == self.max_retries - 1:
+                if attempt == attempts - 1:
                     raise e
+                delay_s = delay_base**attempt if delay_base > 0 else 0
                 if console_logging:
                     print(
                         "Warning: CXAS Agent request failed "
                         f"({e}). Retrying in "
-                        f"{self.retry_delay_base**attempt}s..."
+                        f"{delay_s}s..."
                     )
-                time.sleep(self.retry_delay_base**attempt)
+                if delay_s:
+                    time.sleep(delay_s)
         return response
+
+    def _sleep_for_rate_limit(
+        self, delay_s: float, reason: str, console_logging: bool
+    ) -> None:
+        """Sleep between eval actions when callers opt into rate limiting."""
+        if delay_s <= 0:
+            return
+        if console_logging:
+            print(f"Waiting {delay_s}s {reason}...")
+        time.sleep(delay_s)
 
     def _print_completion_status(self, eval_conv: LLMUserConversation) -> None:
         """Prints the final step progress of the conversation."""
@@ -541,6 +566,9 @@ class SimulationEvals(Apps):
         session_id: Optional[str] = None,
         console_logging: bool = True,
         modality: str = "text",
+        turn_gap_s: float = 0.0,
+        max_request_attempts: int | None = None,
+        retry_delay_base_s: float | None = None,
     ) -> LLMUserConversation:
         """Runs the simulated conversation loop.
 
@@ -549,6 +577,11 @@ class SimulationEvals(Apps):
             model: The Gemini model used for evaluating turns.
             console_logging: Whether to print interaction transcript to
                 the console.
+            modality: 'text' or 'audio'.
+            turn_gap_s: Optional delay before the second and later user turns.
+            max_request_attempts: Attempts per Sessions API request.
+            retry_delay_base_s: Exponential backoff base between request
+                attempts. The first retry waits ``base ** 0`` seconds.
         """
         if session_id is None:
             session_id = str(uuid.uuid4())
@@ -569,9 +602,20 @@ class SimulationEvals(Apps):
         detailed_trace = []
         detailed_trace.append(f"User: {user_utterance}")
 
+        completed_turns = 0
         while user_utterance:
+            if completed_turns:
+                self._sleep_for_rate_limit(
+                    turn_gap_s, "before next turn", console_logging
+                )
             response = self._send_request_with_retry(
-                session_id, user_utterance, variables, modality, console_logging
+                session_id,
+                user_utterance,
+                variables,
+                modality,
+                console_logging,
+                max_request_attempts=max_request_attempts,
+                retry_delay_base_s=retry_delay_base_s,
             )
             if not response:
                 break
@@ -583,6 +627,7 @@ class SimulationEvals(Apps):
                 self._parse_agent_response(response)
             )
             detailed_trace.append("\n".join(trace_chunks))
+            completed_turns += 1
 
             if session_ended:
                 if console_logging:
@@ -628,87 +673,114 @@ class SimulationEvals(Apps):
         modality: str,
         verbose: bool,
         parallel: int,
+        turn_gap_s: float = 0.0,
+        max_request_attempts: int | None = None,
+        retry_delay_base_s: float | None = None,
+        scenario_max_attempts: int = 1,
+        scenario_retry_gap_s: float = 0.0,
     ) -> Dict[str, Any]:
         """Runs a single simulation job and returns the results."""
         name = tc["name"]
         label = f"{name} (run {run_idx + 1}/{runs})"
-        session_id = str(uuid.uuid4())
-        try:
-            _start = time.time()
+        scenario_max_attempts = max(scenario_max_attempts, 1)
+        last_error = None
+        for scenario_attempt in range(1, scenario_max_attempts + 1):
+            session_id = str(uuid.uuid4())
+            try:
+                _start = time.time()
 
-            conv = self.simulate_conversation(
-                test_case=tc,
-                model=model,
-                session_id=session_id,
-                console_logging=verbose and parallel <= 1,
-                modality=modality,
-            )
-            duration_s = round(time.time() - _start, 1)
-
-            goals_completed = sum(
-                1
-                for p in conv.steps_progress
-                if p.status == StepStatus.COMPLETED
-            )
-            total_goals = len(conv.steps_progress)
-            expectations_met = sum(
-                1
-                for r in conv.expectation_results
-                if r.status == ExpectationStatus.MET
-            )
-            total_exp = len(conv.expectation_results)
-
-            passed = goals_completed == total_goals
-            if total_exp > 0:
-                passed = passed and (expectations_met == total_exp)
-
-            status = "PASS" if passed else "FAIL"
-            if parallel > 1 or not verbose:
-                print(
-                    f"  {status}  {label} | goals: "
-                    f"{goals_completed}/{total_goals} | "
-                    f"expectations: {expectations_met}/{total_exp} | "
-                    f"turns: {conv.current_turn} | {duration_s}s"
+                conv = self.simulate_conversation(
+                    test_case=tc,
+                    model=model,
+                    session_id=session_id,
+                    console_logging=verbose and parallel <= 1,
+                    modality=modality,
+                    turn_gap_s=turn_gap_s,
+                    max_request_attempts=max_request_attempts,
+                    retry_delay_base_s=retry_delay_base_s,
                 )
+                duration_s = round(time.time() - _start, 1)
 
-            return {
-                "name": name,
-                "run": run_idx + 1,
-                "passed": passed,
-                "goals": f"{goals_completed}/{total_goals}",
-                "expectations": f"{expectations_met}/{total_exp}",
-                "turns": conv.current_turn,
-                "duration_s": duration_s,
-                "session_id": session_id,
-                "session_parameters": tc.get("session_parameters", {}),
-                "transcript": conv.get_transcript(),
-                "detailed_trace": getattr(conv, "detailed_trace", []),
-                "step_details": [
-                    {
-                        "goal": p.step.goal,
-                        "success_criteria": p.step.success_criteria,
-                        "status": p.status.value,
-                        "justification": p.justification,
-                    }
+                goals_completed = sum(
+                    1
                     for p in conv.steps_progress
-                ],
-                "expectation_details": [
-                    {
-                        "expectation": r.expectation,
-                        "status": r.status.value,
-                        "justification": r.justification,
-                    }
+                    if p.status == StepStatus.COMPLETED
+                )
+                total_goals = len(conv.steps_progress)
+                expectations_met = sum(
+                    1
                     for r in conv.expectation_results
-                ],
-            }
-        except Exception as e:
-            print(f"  ERROR  {label}: {e}")
-            return {
-                "name": name,
-                "run": run_idx + 1,
-                "passed": False,
-                "error": str(e),
-            }
+                    if r.status == ExpectationStatus.MET
+                )
+                total_exp = len(conv.expectation_results)
+
+                passed = goals_completed == total_goals
+                if total_exp > 0:
+                    passed = passed and (expectations_met == total_exp)
+
+                status = "PASS" if passed else "FAIL"
+                if parallel > 1 or not verbose:
+                    print(
+                        f"  {status}  {label} | goals: "
+                        f"{goals_completed}/{total_goals} | "
+                        f"expectations: {expectations_met}/{total_exp} | "
+                        f"turns: {conv.current_turn} | {duration_s}s"
+                    )
+
+                return {
+                    "name": name,
+                    "run": run_idx + 1,
+                    "passed": passed,
+                    "goals": f"{goals_completed}/{total_goals}",
+                    "expectations": f"{expectations_met}/{total_exp}",
+                    "turns": conv.current_turn,
+                    "duration_s": duration_s,
+                    "session_id": session_id,
+                    "attempt": scenario_attempt,
+                    "session_parameters": tc.get("session_parameters", {}),
+                    "transcript": conv.get_transcript(),
+                    "detailed_trace": getattr(conv, "detailed_trace", []),
+                    "step_details": [
+                        {
+                            "goal": p.step.goal,
+                            "success_criteria": p.step.success_criteria,
+                            "status": p.status.value,
+                            "justification": p.justification,
+                        }
+                        for p in conv.steps_progress
+                    ],
+                    "expectation_details": [
+                        {
+                            "expectation": r.expectation,
+                            "status": r.status.value,
+                            "justification": r.justification,
+                        }
+                        for r in conv.expectation_results
+                    ],
+                }
+            except Exception as e:
+                last_error = str(e)
+                if scenario_attempt < scenario_max_attempts:
+                    print(
+                        f"  RETRY  {label}: {e} "
+                        f"(attempt {scenario_attempt}/{scenario_max_attempts})"
+                    )
+                    self._sleep_for_rate_limit(
+                        scenario_retry_gap_s,
+                        "before retrying scenario",
+                        verbose and parallel <= 1,
+                    )
+                    continue
+                print(f"  ERROR  {label}: {e}")
+                break
+
+        return {
+            "name": name,
+            "run": run_idx + 1,
+            "passed": False,
+            "error": last_error or "Unknown simulation error",
+            "attempt": scenario_max_attempts,
+        }
 
     def _aggregate_simulation_results(
         self,
@@ -718,6 +790,12 @@ class SimulationEvals(Apps):
         model: str,
         modality: str,
         verbose: bool,
+        scenario_gap_s: float = 0.0,
+        turn_gap_s: float = 0.0,
+        max_request_attempts: int | None = None,
+        retry_delay_base_s: float | None = None,
+        scenario_max_attempts: int = 1,
+        scenario_retry_gap_s: float = 0.0,
     ) -> List[Dict[str, Any]]:
         """Aggregates results from multiple simulation jobs."""
         results = []
@@ -725,7 +803,7 @@ class SimulationEvals(Apps):
             task_id = progress.add_task("Running Simulations", total=len(jobs))
 
             if parallel <= 1:
-                for tc, run_idx in jobs:
+                for job_idx, (tc, run_idx) in enumerate(jobs):
                     results.append(
                         self._run_single_simulation_job(
                             tc,
@@ -735,14 +813,32 @@ class SimulationEvals(Apps):
                             modality,
                             verbose,
                             parallel,
+                            turn_gap_s=turn_gap_s,
+                            max_request_attempts=max_request_attempts,
+                            retry_delay_base_s=retry_delay_base_s,
+                            scenario_max_attempts=scenario_max_attempts,
+                            scenario_retry_gap_s=scenario_retry_gap_s,
                         )
                     )
                     progress.update(task_id, advance=1)
+                    if job_idx < len(jobs) - 1:
+                        self._sleep_for_rate_limit(
+                            scenario_gap_s,
+                            "before next simulation scenario",
+                            verbose,
+                        )
             else:
                 max_workers = min(parallel, 25)
                 with ThreadPoolExecutor(max_workers=max_workers) as executor:
-                    futures = {
-                        executor.submit(
+                    futures = {}
+                    for job_idx, (tc, run_idx) in enumerate(jobs):
+                        if job_idx:
+                            self._sleep_for_rate_limit(
+                                scenario_gap_s,
+                                "before starting next simulation scenario",
+                                verbose,
+                            )
+                        future = executor.submit(
                             self._run_single_simulation_job,
                             tc,
                             run_idx,
@@ -751,9 +847,13 @@ class SimulationEvals(Apps):
                             modality,
                             verbose,
                             parallel,
-                        ): (tc["name"], run_idx)
-                        for tc, run_idx in jobs
-                    }
+                            turn_gap_s,
+                            max_request_attempts,
+                            retry_delay_base_s,
+                            scenario_max_attempts,
+                            scenario_retry_gap_s,
+                        )
+                        futures[future] = (tc["name"], run_idx)
                     for future in as_completed(futures):
                         results.append(future.result())
                         progress.update(task_id, advance=1)
@@ -768,6 +868,12 @@ class SimulationEvals(Apps):
         model: str = _DEFAULT_GEMINI_MODEL,
         modality: str = "text",
         verbose: bool = False,
+        scenario_gap_s: float = 0.0,
+        turn_gap_s: float = 0.0,
+        max_request_attempts: int | None = None,
+        retry_delay_base_s: float | None = None,
+        scenario_max_attempts: int = 1,
+        scenario_retry_gap_s: float = 0.0,
     ) -> List[Dict[str, Any]]:
         """Runs multiple simulations, optionally in parallel.
 
@@ -778,10 +884,30 @@ class SimulationEvals(Apps):
             model: Gemini model to use.
             modality: 'text' or 'audio'.
             verbose: Whether to log to console (only active if parallel=1).
+            scenario_gap_s: Delay between simulation jobs. With parallel > 1,
+                submissions are staggered by this amount.
+            turn_gap_s: Delay before the second and later user turns.
+            max_request_attempts: Attempts per Sessions API request.
+            retry_delay_base_s: Exponential backoff base between request
+                attempts. The first retry waits ``base ** 0`` seconds.
+            scenario_max_attempts: Attempts for an entire simulation job after
+                request retries are exhausted.
+            scenario_retry_gap_s: Delay before retrying a failed simulation job.
         """
         jobs = self._prepare_simulation_jobs(test_cases, runs)
         return self._aggregate_simulation_results(
-            jobs, runs, parallel, model, modality, verbose
+            jobs,
+            runs,
+            parallel,
+            model,
+            modality,
+            verbose,
+            scenario_gap_s=scenario_gap_s,
+            turn_gap_s=turn_gap_s,
+            max_request_attempts=max_request_attempts,
+            retry_delay_base_s=retry_delay_base_s,
+            scenario_max_attempts=scenario_max_attempts,
+            scenario_retry_gap_s=scenario_retry_gap_s,
         )
 
     def _add_agent_text(self, turn: Turn, text: str) -> None:

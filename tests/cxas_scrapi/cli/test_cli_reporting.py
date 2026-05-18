@@ -85,6 +85,12 @@ def test_combined_evals_report_cmd(tmp_path):
             filter_tags=[],
             parallel=5,
             golden_timeout=600,
+            scenario_gap_s=0.0,
+            turn_gap_s=0.0,
+            max_request_attempts=None,
+            retry_delay_base_s=None,
+            scenario_max_attempts=1,
+            scenario_retry_gap_s=0.0,
         )
 
 
@@ -135,4 +141,74 @@ def test_combined_evals_report_cmd_with_modality_and_runs(tmp_path):
             filter_tags=[],
             parallel=5,
             golden_timeout=600,
+            scenario_gap_s=0.0,
+            turn_gap_s=0.0,
+            max_request_attempts=None,
+            retry_delay_base_s=None,
+            scenario_max_attempts=1,
+            scenario_retry_gap_s=0.0,
+        )
+
+
+def test_combined_evals_report_cmd_with_rate_limit_options(tmp_path):
+    evals_dir = tmp_path / "evals"
+    evals_dir.mkdir()
+
+    class Args:
+        def __init__(self):
+            self.output_dir = str(evals_dir)
+            self.output = None
+            self.gcs_path = None
+            self.golden_run = None
+            self.app_name = None
+            self.run = True
+            self.app_dir = None
+            self.tool_test_file = None
+            self.goldens_dir = None
+            self.simulation_dir = None
+            self.format = "html"
+            self.include = "sims"
+            self.input_dir = None
+            self.modality = "audio"
+            self.runs = 1
+            self.sim_parallel = 1
+            self.golden_timeout = 900
+            self.sim_scenario_gap = 120.0
+            self.sim_turn_gap = 10.0
+            self.sim_max_request_attempts = 4
+            self.sim_retry_delay_base = 3.0
+            self.sim_scenario_attempts = 2
+            self.sim_scenario_retry_gap = 60.0
+
+    args = Args()
+
+    with patch(
+        "cxas_scrapi.utils.reporting.generate_combined_report_from_dir"
+    ) as mock_report:
+        combined_evals_report_cmd(args)
+
+        mock_report.assert_called_once_with(
+            output_dir=str(evals_dir),
+            golden_run=None,
+            app_name=None,
+            output_path=str(evals_dir / "combined_report.html"),
+            run=True,
+            app_dir=None,
+            tool_test_file=None,
+            goldens_dir=None,
+            simulation_dir=None,
+            format="html",
+            include=["sims"],
+            modality="audio",
+            runs=1,
+            filter_files=[],
+            filter_tags=[],
+            parallel=1,
+            golden_timeout=900,
+            scenario_gap_s=120.0,
+            turn_gap_s=10.0,
+            max_request_attempts=4,
+            retry_delay_base_s=3.0,
+            scenario_max_attempts=2,
+            scenario_retry_gap_s=60.0,
         )

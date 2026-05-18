@@ -15,7 +15,7 @@
 """Unit tests for the eval conversation utility."""
 
 import unittest
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock, call, patch
 
 import pandas as pd
 import pytest
@@ -653,6 +653,35 @@ def test_simulation_evals_send_request_with_retry_failure():
     assert evals.sessions_client.run.call_count == 2
 
 
+def test_simulation_evals_send_request_custom_backoff():
+    app_name = "projects/p/locations/l/apps/a"
+    with patch("cxas_scrapi.evals.simulation_evals.GeminiGenerate"):
+        with patch("cxas_scrapi.core.apps.AgentServiceClient"):
+            evals = SimulationEvals(app_name=app_name)
+
+    evals.sessions_client = MagicMock()
+    evals.sessions_client.run.side_effect = [
+        Exception("Transient"),
+        Exception("Still transient"),
+        MagicMock(),
+    ]
+
+    with patch("time.sleep") as mock_sleep:
+        res = evals._send_request_with_retry(
+            "sid",
+            "hi",
+            {},
+            "text",
+            False,
+            max_request_attempts=3,
+            retry_delay_base_s=4,
+        )
+
+    assert evals.sessions_client.run.call_count == 3
+    assert res is not None
+    mock_sleep.assert_has_calls([call(1), call(4)])
+
+
 def test_llm_user_prepare_llm_prompt():
     mock_genai_client = MagicMock()
     test_case = {
@@ -697,6 +726,98 @@ def test_simulation_evals_aggregate_simulation_results_parallel():
     assert len(results) == 2
     assert all(r["status"] == "ok" for r in results)
     assert evals._run_single_simulation_job.call_count == 2
+
+
+def test_simulation_evals_scenario_gap_serial():
+    app_name = "projects/p/locations/l/apps/a"
+    with patch("cxas_scrapi.evals.simulation_evals.GeminiGenerate"):
+        with patch("cxas_scrapi.core.apps.AgentServiceClient"):
+            evals = SimulationEvals(app_name=app_name)
+
+    evals._run_single_simulation_job = MagicMock(return_value={"status": "ok"})
+    jobs = [({"name": "tc1"}, 0), ({"name": "tc2"}, 0)]
+
+    with patch("time.sleep") as mock_sleep:
+        results = evals._aggregate_simulation_results(
+            jobs,
+            runs=1,
+            parallel=1,
+            model="m",
+            modality="audio",
+            verbose=False,
+            scenario_gap_s=12,
+        )
+
+    assert len(results) == 2
+    mock_sleep.assert_called_once_with(12)
+
+
+def test_simulation_evals_turn_gap_between_turns():
+    app_name = "projects/p/locations/l/apps/a"
+    with patch("cxas_scrapi.evals.simulation_evals.GeminiGenerate"):
+        with patch("cxas_scrapi.core.apps.AgentServiceClient"):
+            evals = SimulationEvals(app_name=app_name)
+
+    mock_conv = MagicMock()
+    mock_conv.next_user_utterance.side_effect = [
+        ("hello", {}),
+        ("again", {}),
+        ("", {}),
+    ]
+    mock_conv.steps_progress = []
+    with patch(
+        "cxas_scrapi.evals.simulation_evals.LLMUserConversation",
+        return_value=mock_conv,
+    ):
+        evals._send_request_with_retry = MagicMock(return_value=MagicMock())
+        evals._parse_agent_response = MagicMock(
+            return_value=("agent text", ["Agent Text: agent text"], False)
+        )
+        with patch("time.sleep") as mock_sleep:
+            evals.simulate_conversation(
+                {"steps": []},
+                session_id="sid",
+                console_logging=False,
+                turn_gap_s=7,
+            )
+
+    assert evals._send_request_with_retry.call_count == 2
+    mock_sleep.assert_called_once_with(7)
+
+
+def test_simulation_evals_scenario_retry_after_error():
+    app_name = "projects/p/locations/l/apps/a"
+    with patch("cxas_scrapi.evals.simulation_evals.GeminiGenerate"):
+        with patch("cxas_scrapi.core.apps.AgentServiceClient"):
+            evals = SimulationEvals(app_name=app_name)
+
+    successful_conv = MagicMock()
+    successful_conv.steps_progress = []
+    successful_conv.expectation_results = []
+    successful_conv.current_turn = 0
+    successful_conv.get_transcript.return_value = ""
+    successful_conv.detailed_trace = []
+    evals.simulate_conversation = MagicMock(
+        side_effect=[RuntimeError("quota"), successful_conv]
+    )
+
+    with patch("time.sleep") as mock_sleep:
+        result = evals._run_single_simulation_job(
+            {"name": "tc1"},
+            run_idx=0,
+            runs=1,
+            model="m",
+            modality="audio",
+            verbose=False,
+            parallel=1,
+            scenario_max_attempts=2,
+            scenario_retry_gap_s=5,
+        )
+
+    assert result["passed"] is True
+    assert result["attempt"] == 2
+    assert evals.simulate_conversation.call_count == 2
+    mock_sleep.assert_called_once_with(5)
 
 
 @patch("cxas_scrapi.evals.simulation_evals.ConversationHistory")
