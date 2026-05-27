@@ -1,42 +1,44 @@
-# tau-bench vs. CXAS Scrapi Simulation Evals — Format Comparison
+# τ-bench / τ²-bench vs. CXAS Scrapi Simulation Evals
+
+A format comparison for anyone deciding how to author conversational agent
+evaluations in CXAS, or porting scenarios to/from the τ benchmarks. Scope is the
+**scrapi simulation YAML** (`evals:` → `steps:`), not goldens or turn evals.
 
 ## Structural Philosophy
 
-| | tau-bench / tau2 | CXAS Scrapi Simulation Evals |
+| | τ-bench / τ²-bench | CXAS Scrapi Simulation Evals |
 |---|---|---|
-| **Task definition** | Single `user_instruction` string | Sequential `steps[]` with per-step goals |
-| **World state** | `init_state` — full declarative DB snapshot | `session_parameters` — variable injection only |
-| **Success check** | Code-verifiable: DB state diff after run | LLM-judged: natural language `expectations[]` |
-| **Step tracking** | N/A — single task | Gemini tracks `status` per step each turn |
-| **User simulator** | Separate LLM given `user_instruction` | Gemini given steps + live `step_progresses` |
-| **Policy** | Policy document handed to agent at runtime | Embedded in agent instructions |
+| **Task definition** | Single `instruction` string | Sequential `steps[]`, each with its own goal |
+| **Environment** | Reference DB + mock tools (sandbox) | Live CXAS agent over Sessions API |
+| **World state** | `init_state` — full declarative DB snapshot | `session_parameters` — variable injection |
+| **Success check** | Code-verifiable: DB-state diff + output-string match | LLM-judged: natural-language `expectations[]` |
+| **Step tracking** | N/A — single task | Gemini updates per-step `status` every turn |
+| **User simulator** | LLM given `instruction` | Gemini given `steps[]` + live `step_progresses` |
+| **Policy** | Explicit domain policy doc given to agent | Baked into agent instructions |
 
 ---
 
-## Side-by-Side Format
+## Side-by-Side
 
-### tau2
+### τ-bench task (`Task` dataclass; τ² keeps the same shape)
 ```json
 {
-  "task_id": "retail_return_001",
-  "difficulty": "easy",
-  "task_type": "single_action",
-  "domains": ["retail"],
-  "user_instruction": "Return the black Adidas shoes from order W1234567. You are mildly frustrated.",
-  "init_state": {
-    "orders": { "W1234567": { "status": "delivered", "items": [{"product_id": "shoe_001"}] } },
-    "customer": { "id": "C999", "name": "Alex Smith" }
-  },
-  "ground_truth_actions": [
-    { "tool": "get_order_details", "params": { "order_id": "W1234567" } },
-    { "tool": "process_return",    "params": { "order_id": "W1234567" } }
+  "user_id": "alex_smith_999",
+  "instruction": "You are Alex Smith. Return the black Adidas shoes from order #W1234567. You are mildly frustrated. Do not reveal the order ID unless asked.",
+  "actions": [
+    { "name": "get_order_details", "kwargs": { "order_id": "#W1234567" } },
+    { "name": "return_delivered_order_items",
+      "kwargs": { "order_id": "#W1234567", "item_ids": ["shoe_001"] } }
   ],
-  "verifiable": true,
-  "n_turns_estimate": 5
+  "outputs": ["return has been initiated"]
 }
 ```
+Reward is computed, not judged: the `actions` are replayed on a fresh DB and the
+resulting state is hashed, then compared to the DB state after the agent's run;
+separately, every string in `outputs` must appear in the transcript. Both must
+pass for reward = 1.
 
-### CXAS Scrapi
+### CXAS Scrapi simulation
 ```yaml
 evals:
   - name: process_return
@@ -57,32 +59,61 @@ evals:
 
 ## Key Differences
 
-**1. Ground truth vs. expectations**
-tau2 checks `ground_truth_actions` deterministically against actual tool calls made — pass/fail is code-computed. Scrapi `expectations` are natural-language strings evaluated by Gemini post-conversation — pass/fail is LLM-judged and non-deterministic.
+**1. Verifiable reward vs. LLM-judged expectations**
+τ replays ground-truth `actions` and diffs database state — pass/fail is
+deterministic and reproducible across runs. Scrapi `expectations` are
+natural-language strings scored by Gemini after the conversation, so the same
+transcript can score differently run to run.
 
-**2. World state vs. variable injection**
-tau2's `init_state` declares the full starting DB state; the user simulator and verifier both know what records exist. Scrapi's `session_parameters` inject variables into the session — tool responses are only as controlled as your platform's mock/variable system.
+**2. Declarative world state vs. variable injection**
+τ's `init_state` defines the entire starting DB; both the user simulator and the
+reward function know exactly what records exist. Scrapi simulations inject
+`session_parameters` as variables — there is no post-run state assertion, so
+correctness depends on what the live backend returns.
 
-**3. Single task vs. multi-step**
-tau2 gives the simulator one `user_instruction` for the whole conversation. Scrapi splits the conversation into sequential `steps[]`, each with its own `goal`, `success_criteria`, and `max_turns`. The Gemini user-sim tracks which step is active on every turn and returns updated `step_progresses` alongside the next utterance — one LLM call does both.
+**3. Single instruction vs. multi-step state machine**
+τ hands the simulator one `instruction` for the whole dialogue. Scrapi splits the
+conversation into ordered `steps[]`, each with its own `goal`,
+`success_criteria`, and `max_turns`. On every turn one Gemini call does double
+duty — emit the next user utterance *and* return the updated `step_progresses`
+(Not Started / In Progress / Completed). The step state machine is therefore
+LLM-maintained, not enforced in code.
 
 **4. Persona**
-tau2 embeds persona in the `user_instruction` prose. Scrapi has a dedicated `response_guide` field per step (tone, credentials to reveal, what to say), plus DTMF (`dtmf: <keys>`) and silence (`event: user_inactive`) escape hatches for voice scenarios — neither of which tau2 supports.
+τ embeds persona in the `instruction` prose. Scrapi has a dedicated
+`response_guide` per step (tone, credentials to reveal, what to say), plus
+voice-native escape hatches — `dtmf: <keys>` for keypad entry and
+`event: user_inactive` for silence/no-input — that τ has no concept of.
 
 **5. Task metadata**
-tau2 carries `difficulty`, `task_type`, `domains[]`, `verifiable`, and `n_turns_estimate` as structured fields enabling coverage analysis. Scrapi has only free-form `tags[]`.
+τ² distinguishes domains, dual-control vs. single-control tasks, and ships an
+explicit policy doc per domain. Scrapi simulations carry only free-form `tags[]`.
 
 **6. What the user-sim LLM sees**
-tau2 gives the simulator the full conversation history including tool traces. Scrapi deliberately shows the user-sim only clean `User: / Agent:` text — it is kept ignorant of tool calls and transfers, which mirrors what a real caller would hear. Tool traces are reserved for the separate expectations-evaluation LLM at end-of-conversation.
+τ shows the simulator the running conversation. Scrapi deliberately feeds the
+user-sim only clean `User:` / `Agent:` text — it is kept *blind to tool calls and
+transfers*, mirroring what a real caller hears. The full trace (tool calls,
+responses, transfers, payloads) is reserved for the separate
+expectations-evaluator that runs once at end-of-conversation.
+
+> **Note on structured assertions.** τ's tool-level checking has no equivalent in
+> the scrapi *simulation* YAML — but it does exist elsewhere in CXAS: turn evals
+> (`type: tool_called` / `tool_input` / `tool_output`) and the underlying platform
+> scenario format (`scenarioExpectations[].toolExpectation.expectedToolCall`).
+> The gap is the simulation surface, not the platform.
 
 ---
 
 ## What Each Does Better
 
-| CXAS Scrapi does better | tau2 does better |
+| CXAS Scrapi does better | τ-bench / τ²-bench does better |
 |---|---|
-| Multi-step sequential goal tracking | Deterministic, code-checkable pass/fail |
-| Per-step turn budgets (`max_turns`) | Full world state declaration (`init_state`) |
-| Voice-native: DTMF, silence, audio modality | Structured task metadata (difficulty, type, domain) |
-| Static utterance escape hatch | Policy document integration |
-| Direct integration with live production agents | Reproducible ground truth across runs |
+| Multi-step sequential goal tracking | Deterministic, code-checkable reward |
+| Per-step turn budgets (`max_turns`) | Full declarative world state (`init_state`) |
+| Voice-native: DTMF, silence, audio modality | Structured tool-call ground truth (`actions`) |
+| Static-utterance escape hatch | Domain policy + dual-control task modeling |
+| Tests the **live deployed agent** end-to-end | Reproducible across runs (sandbox env) |
+
+τ optimizes for **reproducible, code-verified benchmarking** against a reference
+sandbox. Scrapi simulations optimize for **exercising a real production CXAS agent**
+through multi-step, voice-capable, LLM-judged conversations.
