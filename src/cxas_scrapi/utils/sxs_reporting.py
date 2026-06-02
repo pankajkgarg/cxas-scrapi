@@ -145,7 +145,9 @@ def _card_header(
     a_badge = "pass" if pa else "fail"
     b_badge = "pass" if pb else "fail"
     body_display = (
-        "block" if outcome in ("regression", "improvement") else "none"
+        "block"
+        if outcome in ("regression", "improvement", "both-fail")
+        else "none"
     )
     return outcome, header_cls, delta, delta_cls, a_badge, b_badge, body_display
 
@@ -272,6 +274,33 @@ def _render_sim_test_card(
     )
 
     session_html = _session_row(test, ces_base_a, ces_base_b, label_a, label_b)
+
+    # Render infrastructure/API tracebacks clearly in red callout
+    # boxes if they exist
+    error_a_html = ""
+    if test.get("error_a"):
+        error_a_html = (
+            '<div class="check-item fail-bg" style="margin: 10px 0; '
+            f'border-left: 4px solid #d32f2f;"><b>{label_a} Error:</b> '
+            '<pre style="margin: 4px 0; white-space: pre-wrap; '
+            f'font-family: inherit;">{_e(test["error_a"])}</pre></div>'
+        )
+
+    error_b_html = ""
+    if test.get("error_b"):
+        error_b_html = (
+            '<div class="check-item fail-bg" style="margin: 10px 0; '
+            f'border-left: 4px solid #d32f2f;"><b>{label_b} Error:</b> '
+            '<pre style="margin: 4px 0; white-space: pre-wrap; '
+            f'font-family: inherit;">{_e(test["error_b"])}</pre></div>'
+        )
+
+    errors_html = ""
+    if error_a_html or error_b_html:
+        errors_html = (
+            '<div class="sxs-errors" style="margin-bottom: 12px;">'
+            f"{error_a_html}{error_b_html}</div>"
+        )
 
     # Steps table
     step_rows = ""
@@ -415,6 +444,7 @@ def _render_sim_test_card(
         f'style="display:{body_display}">\n'
         f"    {stats_html}\n"
         f"    {session_html}\n"
+        f"    {errors_html}\n"
         f"    {steps_table}\n"
         f"    {exps_table}\n"
         f"    {transcripts_html}\n"

@@ -130,6 +130,7 @@ class BidiSessionHandler:
         self.agent_turn_manager = AgentTurnManager()
         self.ws_app = None
         self.outputs = []
+        self.error = None
 
     def _send_silence(self, num_chunks: int):
         silence_chunk = b"\x00" * AUDIO_CHUNK_SIZE
@@ -318,7 +319,8 @@ class BidiSessionHandler:
             logging.debug("Failed to parse message: %s", e)
 
     def _on_error(self, ws, error):
-        logging.debug("WebSocket error: %s", error)
+        logging.error("WebSocket error: %s", error)
+        self.error = error
 
     def _on_close(self, ws, close_status_code, close_msg):
         logging.debug(
@@ -326,6 +328,12 @@ class BidiSessionHandler:
             close_status_code,
             close_msg,
         )
+        if close_status_code and close_status_code not in (1000, 1001):
+            if not self.error:
+                self.error = (
+                    "WebSocket closed unexpectedly with code "
+                    f"{close_status_code}: {close_msg}"
+                )
 
     def run(self):
         logging.debug("Connecting to WebSocket: %s", self.uri)
@@ -350,6 +358,9 @@ class BidiSessionHandler:
 
         logging.debug("Waiting for session to complete...")
         wst.join()
+
+        if self.error:
+            raise RuntimeError(f"Bidi session failed: {self.error}")
 
         return types.RunSessionResponse(outputs=self.outputs)
 

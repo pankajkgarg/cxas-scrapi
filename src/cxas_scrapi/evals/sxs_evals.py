@@ -394,6 +394,8 @@ class SxSEvals:
                     "turns_b": rb.get("turns", 0),
                     "steps": steps,
                     "expectations": expectations,
+                    "error_a": ra.get("error", ""),
+                    "error_b": rb.get("error", ""),
                     # Use detailed_trace (not transcript) — it has tool calls
                     "trace_a": ra.get("detailed_trace", []),
                     "trace_b": rb.get("detailed_trace", []),

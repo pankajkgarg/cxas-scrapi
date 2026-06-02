@@ -562,87 +562,98 @@ class SimulationEvals(Apps):
         modality: str,
         verbose: bool,
         parallel: int,
+        max_simulation_retries: int = 3,
     ) -> Dict[str, Any]:
         """Runs a single simulation job and returns the results."""
         name = tc["name"]
         label = f"{name} (run {run_idx + 1}/{runs})"
-        session_id = str(uuid.uuid4())
-        try:
-            _start = time.time()
 
-            conv = self.simulate_conversation(
-                test_case=tc,
-                model=model,
-                session_id=session_id,
-                console_logging=verbose and parallel <= 1,
-                modality=modality,
-            )
-            duration_s = round(time.time() - _start, 1)
+        for attempt in range(max_simulation_retries):
+            session_id = str(uuid.uuid4())
+            try:
+                _start = time.time()
 
-            goals_completed = sum(
-                1
-                for p in conv.steps_progress
-                if p.status == StepStatus.COMPLETED
-            )
-            total_goals = len(conv.steps_progress)
-            expectations_met = sum(
-                1
-                for r in conv.expectation_results
-                if r.status == ExpectationStatus.MET
-            )
-            total_exp = len(conv.expectation_results)
-
-            passed = goals_completed == total_goals
-            if total_exp > 0:
-                passed = passed and (expectations_met == total_exp)
-
-            status = "PASS" if passed else "FAIL"
-            if parallel > 1 or not verbose:
-                print(
-                    f"  {status}  {label} | goals: "
-                    f"{goals_completed}/{total_goals} | "
-                    f"expectations: {expectations_met}/{total_exp} | "
-                    f"turns: {conv.current_turn} | {duration_s}s"
+                conv = self.simulate_conversation(
+                    test_case=tc,
+                    model=model,
+                    session_id=session_id,
+                    console_logging=verbose and parallel <= 1,
+                    modality=modality,
                 )
+                duration_s = round(time.time() - _start, 1)
 
-            return {
-                "name": name,
-                "run": run_idx + 1,
-                "passed": passed,
-                "goals": f"{goals_completed}/{total_goals}",
-                "expectations": f"{expectations_met}/{total_exp}",
-                "turns": conv.current_turn,
-                "duration_s": duration_s,
-                "session_id": session_id,
-                "session_parameters": tc.get("session_parameters", {}),
-                "transcript": conv.get_transcript(),
-                "detailed_trace": getattr(conv, "detailed_trace", []),
-                "step_details": [
-                    {
-                        "goal": p.step.goal,
-                        "success_criteria": p.step.success_criteria,
-                        "status": p.status.value,
-                        "justification": p.justification,
-                    }
+                goals_completed = sum(
+                    1
                     for p in conv.steps_progress
-                ],
-                "expectation_details": [
-                    {
-                        "expectation": r.expectation,
-                        "status": r.status.value,
-                        "justification": r.justification,
-                    }
+                    if p.status == StepStatus.COMPLETED
+                )
+                total_goals = len(conv.steps_progress)
+                expectations_met = sum(
+                    1
                     for r in conv.expectation_results
-                ],
-            }
-        except Exception as e:
-            print(f"  ERROR  {label}: {e}")
-            return {
-                "name": name,
-                "run": run_idx + 1,
-                "passed": False,
-                "error": str(e),
-            }
+                    if r.status == ExpectationStatus.MET
+                )
+                total_exp = len(conv.expectation_results)
+
+                passed = goals_completed == total_goals
+                if total_exp > 0:
+                    passed = passed and (expectations_met == total_exp)
+
+                status = "PASS" if passed else "FAIL"
+                if parallel > 1 or not verbose:
+                    print(
+                        f"  {status}  {label} | goals: "
+                        f"{goals_completed}/{total_goals} | "
+                        f"expectations: {expectations_met}/{total_exp} | "
+                        f"turns: {conv.current_turn} | {duration_s}s"
+                    )
+
+                return {
+                    "name": name,
+                    "run": run_idx + 1,
+                    "passed": passed,
+                    "goals": f"{goals_completed}/{total_goals}",
+                    "expectations": f"{expectations_met}/{total_exp}",
+                    "turns": conv.current_turn,
+                    "duration_s": duration_s,
+                    "session_id": session_id,
+                    "session_parameters": tc.get("session_parameters", {}),
+                    "transcript": conv.get_transcript(),
+                    "detailed_trace": getattr(conv, "detailed_trace", []),
+                    "step_details": [
+                        {
+                            "goal": p.step.goal,
+                            "success_criteria": p.step.success_criteria,
+                            "status": p.status.value,
+                            "justification": p.justification,
+                        }
+                        for p in conv.steps_progress
+                    ],
+                    "expectation_details": [
+                        {
+                            "expectation": r.expectation,
+                            "status": r.status.value,
+                            "justification": r.justification,
+                        }
+                        for r in conv.expectation_results
+                    ],
+                }
+            except Exception as e:
+                if attempt < max_simulation_retries - 1:
+                    print(
+                        f"  ERROR  {label} (attempt {attempt + 1}/"
+                        f"{max_simulation_retries}): {e} | retrying..."
+                    )
+                    time.sleep(2)
+                    continue
+
+                print(f"  ERROR  {label} (failed all attempts): {e}")
+                return {
+                    "name": name,
+                    "run": run_idx + 1,
+                    "passed": False,
+                    "error": str(e),
+                }
 
     def _aggregate_simulation_results(
         self,

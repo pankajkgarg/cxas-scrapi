@@ -16,6 +16,7 @@ import asyncio
 import logging
 import random
 import threading
+import time
 from typing import Any, Optional
 
 from google import genai
@@ -104,8 +105,10 @@ class GeminiGenerate:
         response_schema: Optional[Any] = None,
         temperature: Optional[float] = 1.0,
         thinking_level: Optional[str] = None,
+        max_retries: int = 5,
+        base_delay_seconds: int = 5,
     ) -> Optional[Any]:
-        """Generates content using the Gemini model.
+        """Generates content using the Gemini model with retries.
 
         Args:
             prompt: The user prompt.
@@ -118,6 +121,8 @@ class GeminiGenerate:
             temperature: Optional temperature setting. Defaults to 1.0.
             thinking_level: Optional Vertex `ThinkingConfig` budget; one of
               "low" / "medium" / "high". `None` disables thinking entirely.
+            max_retries: Maximum number of retries for transient errors.
+            base_delay_seconds: Base delay for exponential backoff.
 
         Returns:
             The generated text response or parsed object, or None on failure.
@@ -132,17 +137,45 @@ class GeminiGenerate:
             thinking_level=thinking_level,
         )
 
-        try:
-            response = self.client.models.generate_content(
-                model=target_model, contents=prompt, config=config
-            )
+        for attempt in range(max_retries):
+            try:
+                response = self.client.models.generate_content(
+                    model=target_model, contents=prompt, config=config
+                )
 
-            if response_mime_type == "application/json" and response_schema:
-                return response.parsed
-            return response.text
-        except Exception as e:
-            logger.error(f"Gemini generation failed: {e}")
-            return None
+                if response_mime_type == "application/json" and response_schema:
+                    return response.parsed
+                return response.text
+            except Exception as e:
+                is_quota = "429" in str(e) or "RESOURCE_EXHAUSTED" in str(e)
+                err_msg = (
+                    "Quota/Rate Limit Exhausted"
+                    if is_quota
+                    else f"{type(e).__name__}: {e}"
+                )
+
+                logger.warning(
+                    f"Gemini generation attempt {attempt + 1} failed: {err_msg}"
+                )
+                if hasattr(self._thread_local, "client"):
+                    delattr(self._thread_local, "client")
+
+                if attempt == max_retries - 1:
+                    logger.error(
+                        "  ❌ All retry attempts failed. Check GCP quota."
+                    )
+                    return None
+
+                # EXPONENTIAL BACKOFF WITH JITTER
+                sleep_time = (
+                    base_delay_seconds * (1.5**attempt)
+                ) + random.uniform(0, 3)
+                logger.info(
+                    f"    ⏳ Sleeping for {sleep_time:.1f}s before retry..."
+                )
+                time.sleep(sleep_time)
+
+        return None
 
     def generate_with_parts(
         self,
@@ -153,6 +186,8 @@ class GeminiGenerate:
         response_schema: Optional[Any] = None,
         temperature: Optional[float] = 1.0,
         thinking_level: Optional[str] = None,
+        max_retries: int = 5,
+        base_delay_seconds: int = 5,
     ) -> Optional[Any]:
         """Generates content from a list of multimodal Parts.
 
@@ -171,6 +206,8 @@ class GeminiGenerate:
             temperature: Sampling temperature.
             thinking_level: Optional Vertex `ThinkingConfig` budget; one of
               "low" / "medium" / "high". `None` disables thinking entirely.
+            max_retries: Maximum number of retries for transient errors.
+            base_delay_seconds: Base delay for exponential backoff.
         """
         target_model = model_name or self.model_name
 
@@ -189,16 +226,46 @@ class GeminiGenerate:
             thinking_level=thinking_level,
         )
 
-        try:
-            response = self.client.models.generate_content(
-                model=target_model, contents=contents, config=config
-            )
-            if response_mime_type == "application/json" and response_schema:
-                return response.parsed
-            return response.text
-        except Exception as e:
-            logger.error(f"Gemini multimodal generation failed: {e}")
-            return None
+        for attempt in range(max_retries):
+            try:
+                response = self.client.models.generate_content(
+                    model=target_model, contents=contents, config=config
+                )
+                if response_mime_type == "application/json" and response_schema:
+                    return response.parsed
+                return response.text
+            except Exception as e:
+                is_quota = "429" in str(e) or "RESOURCE_EXHAUSTED" in str(e)
+                err_msg = (
+                    "Quota/Rate Limit Exhausted"
+                    if is_quota
+                    else f"{type(e).__name__}: {e}"
+                )
+
+                logger.warning(
+                    f"Gemini multimodal generation attempt {attempt + 1} "
+                    f"failed: {err_msg}"
+                )
+                if hasattr(self._thread_local, "client"):
+                    delattr(self._thread_local, "client")
+
+                if attempt == max_retries - 1:
+                    logger.error(
+                        "  ❌ All multimodal retry attempts failed. "
+                        "Check GCP quota."
+                    )
+                    return None
+
+                # EXPONENTIAL BACKOFF WITH JITTER
+                sleep_time = (
+                    base_delay_seconds * (1.5**attempt)
+                ) + random.uniform(0, 3)
+                logger.info(
+                    f"    ⏳ Sleeping for {sleep_time:.1f}s before retry..."
+                )
+                time.sleep(sleep_time)
+
+        return None
 
     async def generate_async(
         self,
@@ -298,4 +365,6 @@ class GeminiGenerate:
                 return [embedding.values for embedding in response.embeddings]
         except Exception as e:
             logger.error(f"Gemini embedding generation failed: {e}")
+            if hasattr(self._thread_local, "client"):
+                delattr(self._thread_local, "client")
         return []
