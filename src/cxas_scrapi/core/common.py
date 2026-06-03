@@ -33,6 +33,8 @@ GLOBAL_SCOPES = [
     "https://www.googleapis.com/auth/generative-language.retriever",
 ]
 
+DEFAULT_API_ENDPOINT = os.environ.get("CES_API_ENDPOINT", "ces.googleapis.com")
+
 
 class Common:
     """Core Class for managing Auth and shared functions in CX Agent Studio."""
@@ -158,7 +160,7 @@ class Common:
             return {}
 
         # Using global endpoint mapping for CXAS v1beta
-        api_endpoint = "ces.googleapis.com"
+        api_endpoint = DEFAULT_API_ENDPOINT
         return {"api_endpoint": api_endpoint}
 
     @staticmethod
@@ -191,6 +193,24 @@ class Common:
                 and parts[2] == "locations"
             ):
                 return parts[3]
+        except Exception:
+            pass
+        return None
+
+    @staticmethod
+    def _get_app_name(resource_name: str) -> Optional[str]:
+        """Extract fully-qualified app name from a resource string."""
+        if not resource_name:
+            return None
+        try:
+            parts = resource_name.split("/")
+            if (
+                len(parts) >= 6
+                and parts[0] == "projects"
+                and parts[2] == "locations"
+                and parts[4] == "apps"
+            ):
+                return "/".join(parts[:6])
         except Exception:
             pass
         return None
@@ -348,14 +368,23 @@ class Common:
         return separator.join(agent_texts)
 
     def get_grpc_transport(self, client_class: type):
-        """Creates a customer gRPC transport for CXAS SCRAPI calls."""
-        transport_class = client_class.get_transport_class("grpc")
+        """Creates a customer transport for CXAS SCRAPI calls."""
+        transport_type = os.environ.get("CES_TRANSPORT", "grpc").lower()
 
-        host = "ces.googleapis.com"
+        host = DEFAULT_API_ENDPOINT
         client_opts = getattr(self, "client_options", None)
         if client_opts and "api_endpoint" in client_opts:
             host = self.client_options["api_endpoint"]
 
+        if transport_type == "rest":
+            transport_class = client_class.get_transport_class("rest")
+            return transport_class(
+                host=host,
+                credentials=self.creds,
+                client_info=self.client_info,
+            )
+
+        transport_class = client_class.get_transport_class("grpc")
         channel = transport_class.create_channel(
             host=host,
             credentials=self.creds,

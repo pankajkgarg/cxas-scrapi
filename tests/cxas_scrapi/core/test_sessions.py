@@ -303,6 +303,9 @@ def test_agent_turn_manager_no_audio():
 @patch("cxas_scrapi.core.sessions.websocket.WebSocketApp")
 @patch("cxas_scrapi.core.sessions.threading.Thread")
 def test_bidi_session_handler_run(mock_thread, mock_ws_app):
+    # Configure mock thread so is_alive() returns False (no timeout)
+    mock_thread.return_value.is_alive.return_value = False
+
     config = {"session": "projects/p/locations/us/apps/a/sessions/s1"}
     inputs = [{"text": "Hello"}]
     handler = BidiSessionHandler(
@@ -636,3 +639,53 @@ def test_check_audio_requirements_no_project_id_raises_error():
     with pytest.raises(ValueError) as exc_info:
         sessions._check_audio_requirements()
     assert "Project ID could not be determined" in str(exc_info.value)
+
+
+@patch("cxas_scrapi.core.sessions.SessionServiceClient")
+def test_sessions_rate_limiting(mock_client_cls):
+    """Test Sessions.run with rate limiting."""
+    mock_rate_limiter = MagicMock()
+
+    sessions = Sessions(
+        app_name="projects/p/locations/l/apps/a",
+        rate_limiter=mock_rate_limiter,
+    )
+
+    sessions.run(session_id="s1", text="hello")
+
+    # Verify rate limiter was called
+    mock_rate_limiter.wait_and_consume.assert_called_once()
+
+
+@patch("cxas_scrapi.core.sessions.SessionServiceClient")
+def test_sessions_rate_limiting_multi_turn(mock_client_cls):
+    """Test Sessions.run with rate limiting for multiple turns."""
+    mock_rate_limiter = MagicMock()
+
+    sessions = Sessions(
+        app_name="projects/p/locations/l/apps/a",
+        rate_limiter=mock_rate_limiter,
+    )
+
+    sessions.run(session_id="s1", text=["hello", "world"])
+
+    # Verify rate limiter was called twice
+    assert mock_rate_limiter.wait_and_consume.call_count == 2
+
+
+def test_bidi_session_handler_pydub_missing_raises_error():
+    """Test BidiSessionHandler raises ImportError when pydub is missing."""
+    config = {"session": "projects/p/locations/us/apps/a/sessions/s1"}
+
+    with patch("cxas_scrapi.core.sessions.AudioSegment", None):
+        with pytest.raises(ImportError) as exc_info:
+            BidiSessionHandler(
+                location="us",
+                token="fake_token",
+                config=config,
+                inputs=[],
+                background_noise_file="mock_noise.wav",
+            )
+        assert "pydub is not installed or failed to import" in str(
+            exc_info.value
+        )

@@ -15,6 +15,7 @@
 import asyncio
 import logging
 import random
+import threading
 from typing import Any, Optional
 
 from google import genai
@@ -49,13 +50,50 @@ class GeminiGenerate:
             f"Initializing GeminiGenerate with model: {self.model_name} "
             f"(Max Concurrency: {max_concurrent_requests})"
         )
-        self.client = genai.Client(
-            vertexai=True,
-            project=project_id,
-            location=location,
-            credentials=credentials,
-        )
+        self.project_id = project_id
+        self.location = location
+        self.credentials = credentials
+        self._thread_local = threading.local()
         self.semaphore = asyncio.Semaphore(max_concurrent_requests)
+
+    @property
+    def client(self) -> genai.Client:
+        """Get or create a thread-local genai.Client instance."""
+        if not hasattr(self._thread_local, "client"):
+            self._thread_local.client = genai.Client(
+                vertexai=True,
+                project=self.project_id,
+                location=self.location,
+                credentials=self.credentials,
+            )
+        return self._thread_local.client
+
+    def _build_generation_config(
+        self,
+        system_prompt: Optional[str] = None,
+        response_mime_type: Optional[str] = None,
+        response_schema: Optional[Any] = None,
+        temperature: Optional[float] = 1.0,
+        thinking_level: Optional[str] = None,
+    ) -> Optional[genai.types.GenerateContentConfig]:
+        """Helper to construct GenerateContentConfig for the GenAI SDK."""
+        config_args = {}
+        if system_prompt:
+            config_args["system_instruction"] = system_prompt
+        if response_mime_type:
+            config_args["response_mime_type"] = response_mime_type
+        if response_schema:
+            config_args["response_schema"] = response_schema
+        if temperature is not None:
+            config_args["temperature"] = temperature
+        if thinking_level:
+            config_args["thinking_config"] = genai.types.ThinkingConfig(
+                thinking_level=thinking_level
+            )
+
+        if config_args:
+            return genai.types.GenerateContentConfig(**config_args)
+        return None
 
     def generate(
         self,
@@ -86,23 +124,13 @@ class GeminiGenerate:
         """
         target_model = model_name or self.model_name
 
-        config_args = {}
-        if system_prompt:
-            config_args["system_instruction"] = system_prompt
-        if response_mime_type:
-            config_args["response_mime_type"] = response_mime_type
-        if response_schema:
-            config_args["response_schema"] = response_schema
-        if temperature is not None:
-            config_args["temperature"] = temperature
-        if thinking_level:
-            config_args["thinking_config"] = genai.types.ThinkingConfig(
-                thinking_level=thinking_level
-            )
-
-        config = None
-        if config_args:
-            config = genai.types.GenerateContentConfig(**config_args)
+        config = self._build_generation_config(
+            system_prompt=system_prompt,
+            response_mime_type=response_mime_type,
+            response_schema=response_schema,
+            temperature=temperature,
+            thinking_level=thinking_level,
+        )
 
         try:
             response = self.client.models.generate_content(
@@ -153,23 +181,13 @@ class GeminiGenerate:
             else:
                 contents.append(part)
 
-        config_args = {}
-        if system_prompt:
-            config_args["system_instruction"] = system_prompt
-        if response_mime_type:
-            config_args["response_mime_type"] = response_mime_type
-        if response_schema:
-            config_args["response_schema"] = response_schema
-        if temperature is not None:
-            config_args["temperature"] = temperature
-        if thinking_level:
-            config_args["thinking_config"] = genai.types.ThinkingConfig(
-                thinking_level=thinking_level
-            )
-
-        config = None
-        if config_args:
-            config = genai.types.GenerateContentConfig(**config_args)
+        config = self._build_generation_config(
+            system_prompt=system_prompt,
+            response_mime_type=response_mime_type,
+            response_schema=response_schema,
+            temperature=temperature,
+            thinking_level=thinking_level,
+        )
 
         try:
             response = self.client.models.generate_content(
@@ -212,19 +230,12 @@ class GeminiGenerate:
         """
         target_model = model_name or self.model_name
 
-        config_args = {}
-        if system_prompt:
-            config_args["system_instruction"] = system_prompt
-        if response_mime_type:
-            config_args["response_mime_type"] = response_mime_type
-        if response_schema:
-            config_args["response_schema"] = response_schema
-        if temperature is not None:
-            config_args["temperature"] = temperature
-
-        config = None
-        if config_args:
-            config = genai.types.GenerateContentConfig(**config_args)
+        config = self._build_generation_config(
+            system_prompt=system_prompt,
+            response_mime_type=response_mime_type,
+            response_schema=response_schema,
+            temperature=temperature,
+        )
 
         for attempt in range(max_retries):
             try:

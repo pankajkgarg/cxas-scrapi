@@ -29,6 +29,7 @@ from rich.progress import Progress
 
 from cxas_scrapi.core.apps import Apps
 from cxas_scrapi.core.conversation_history import ConversationHistory
+from cxas_scrapi.core.response_parser import ParsedSessionResponse
 from cxas_scrapi.core.sessions import Sessions
 from cxas_scrapi.core.tools import Tools
 from cxas_scrapi.prompts import llm_user_prompts
@@ -46,10 +47,11 @@ from cxas_scrapi.utils.eval_utils import (
     evaluate_expectations,
 )
 from cxas_scrapi.utils.gemini import GeminiGenerate
+from cxas_scrapi.utils.rate_limiter import RateLimiter
 
 _FIRST_UTTERANCE = "event: welcome"
 _MAX_TURNS = 30
-_DEFAULT_GEMINI_MODEL = "gemini-3.1-flash-lite-preview"
+_DEFAULT_GEMINI_MODEL = "gemini-3.1-flash-lite"
 
 
 class Step(pydantic.BaseModel):
@@ -211,18 +213,12 @@ class LLMUserConversation(Conversation):
 
         return True
 
-    def _handle_first_turn(self) -> Optional[tuple[str, Dict[str, Any]]]:
-        """Handles the special logic for the first turn."""
-        if self.current_turn != 0:
-            return None
-
-        session_params = self.test_case.get("session_parameters", {})
-        if not self.test_case["steps"][0].get("static_utterance", None):
-            return _FIRST_UTTERANCE, session_params
-
-        inject_vars = self.test_case["steps"][0].get("inject_variables", {})
-        merged_vars = {**session_params, **inject_vars}
-        return self.test_case["steps"][0]["static_utterance"], merged_vars
+    def _get_active_step_index(self) -> Optional[int]:
+        """Finds the index of the first step that is not completed."""
+        for i, prog in enumerate(self.steps_progress):
+            if prog.status != StepStatus.COMPLETED:
+                return i
+        return None
 
     def _prepare_llm_prompt(self) -> str:
         """Prepares the prompt for the LLM user."""
@@ -263,9 +259,27 @@ class LLMUserConversation(Conversation):
         if not self._check_conversation_status():
             return "", {}
 
-        first_turn = self._handle_first_turn()
-        if first_turn:
-            return first_turn
+        active_idx = self._get_active_step_index()
+        if active_idx is not None:
+            active_step_prog = self.steps_progress[active_idx]
+            if active_step_prog.step.static_utterance:
+                # Mark static step as completed
+                active_step_prog.status = StepStatus.COMPLETED
+                active_step_prog.justification = (
+                    "Static utterance sent (bypassed LLM)."
+                )
+
+                utterance = active_step_prog.step.static_utterance
+                session_params = self.test_case.get("session_parameters", {})
+                inject_vars = self.test_case["steps"][active_idx].get(
+                    "inject_variables", {}
+                )
+                merged_vars = {**session_params, **inject_vars}
+                return utterance, merged_vars
+
+        if self.current_turn == 0:
+            session_params = self.test_case.get("session_parameters", {})
+            return _FIRST_UTTERANCE, session_params
 
         prompt = self._prepare_llm_prompt()
 
@@ -333,12 +347,19 @@ class SimulationEvals(Apps):
     max_retries: int = 3
     retry_delay_base: int = 2
 
-    def __init__(self, app_name: str, **kwargs):
+    def __init__(
+        self,
+        app_name: str,
+        rate_limiter: Optional[RateLimiter] = None,
+        **kwargs,
+    ):
         self.app_name = app_name
         project_id = app_name.split("/")[1]
         location = app_name.split("/")[3]
         super().__init__(project_id=project_id, location=location, **kwargs)
-        self.sessions_client = Sessions(app_name, **kwargs)
+        self.sessions_client = Sessions(
+            app_name, rate_limiter=rate_limiter, **kwargs
+        )
         self.tools_map = Tools(app_name=app_name, **kwargs).get_tools_map()
 
         # Vertex AI requires a specific region (e.g. global), whereas CXAS
@@ -359,98 +380,12 @@ class SimulationEvals(Apps):
         Returns:
             A tuple of (agent_text, trace_chunks, session_ended)
         """
-        agent_text = ""
-        session_ended = False
-        trace_chunks = []
-
-        for output in response.outputs:
-            if hasattr(output, "text") and output.text:
-                agent_text += output.text + " "
-                trace_chunks.append(f"Agent Text: {output.text}")
-
-            tool_calls_msg = getattr(output, "tool_calls", None)
-            if tool_calls_msg and hasattr(tool_calls_msg, "tool_calls"):
-                for tc in tool_calls_msg.tool_calls:
-                    tool_name = getattr(tc, "tool", "") or getattr(
-                        tc, "display_name", ""
-                    )
-                    expanded_args = Sessions._expand_pb_struct(tc.args)
-                    trace_chunks.append(
-                        f"Tool Call (Output): {tool_name} "
-                        f"with args {expanded_args}"
-                    )
-                    if "end_session" in tool_name:
-                        session_ended = True
-
-            diagnostic_info = getattr(output, "diagnostic_info", None)
-            if diagnostic_info and hasattr(diagnostic_info, "messages"):
-                for message in diagnostic_info.messages:
-                    for chunk in getattr(message, "chunks", []):
-                        add_text, ended = self._process_diagnostic_chunk(
-                            chunk, trace_chunks
-                        )
-                        agent_text += add_text
-                        if ended:
-                            session_ended = True
-
-        return agent_text.strip(), trace_chunks, session_ended
-
-    def _process_diagnostic_chunk(
-        self, chunk: Any, trace_chunks: list[str]
-    ) -> tuple[str, bool]:
-        """Processes a single diagnostic chunk and updates trace_chunks."""
-        agent_text_add = ""
-        session_ended = False
-
-        chunk_type = (
-            chunk._pb.WhichOneof("data") if hasattr(chunk, "_pb") else None
+        parsed = ParsedSessionResponse(response, tools_map=self.tools_map)
+        return (
+            parsed.consolidated_agent_text,
+            parsed.detailed_trace,
+            parsed.session_ended,
         )
-        if chunk_type == "tool_call":
-            tc = chunk.tool_call
-            tool_name = getattr(tc, "display_name", "") or getattr(
-                tc, "tool", ""
-            )
-            if (
-                tool_name
-                and "/tools/" in tool_name
-                and hasattr(self, "tools_map")
-            ):
-                tool_name = self.tools_map.get(tool_name, tool_name)
-            expanded_args = Sessions._expand_pb_struct(tc.args)
-            trace_chunks.append(
-                f"Tool Call: {tool_name} with args {expanded_args}"
-            )
-            if "end_session" in tool_name:
-                session_ended = True
-        elif chunk_type == "tool_response":
-            tr = chunk.tool_response
-            tool_name = getattr(tr, "display_name", "") or getattr(
-                tr, "tool", ""
-            )
-            if (
-                tool_name
-                and "/tools/" in tool_name
-                and hasattr(self, "tools_map")
-            ):
-                tool_name = self.tools_map.get(tool_name, tool_name)
-            expanded_response = Sessions._expand_pb_struct(tr.response)
-            trace_chunks.append(
-                f"Tool Response: {tool_name} with result {expanded_response}"
-            )
-        elif chunk_type == "agent_transfer":
-            at = chunk.agent_transfer
-            display_name = getattr(at, "display_name", "unknown")
-            trace_chunks.append(
-                f"Agent Transfer: Transferred to {display_name}"
-            )
-        elif chunk_type == "payload":
-            expanded_payload = Sessions._expand_pb_struct(chunk.payload)
-            trace_chunks.append(f"Custom Payload: {expanded_payload}")
-        elif chunk_type == "text":
-            agent_text_add = chunk.text + " "
-            trace_chunks.append(f"Agent Text (Diag): {chunk.text}")
-
-        return agent_text_add, session_ended
 
     def _evaluate_expectations(
         self,
@@ -481,6 +416,8 @@ class SimulationEvals(Apps):
         variables: Dict[str, Any],
         modality: str,
         console_logging: bool,
+        background_noise_file: Optional[str] = None,
+        burst_noise_files: Optional[List[str]] = None,
     ) -> Any:
         """Sends a request to the CES Agent with exponential backoff for
         transient errors.
@@ -494,6 +431,8 @@ class SimulationEvals(Apps):
                         event=user_utterance.removeprefix("event:").strip(),
                         variables=variables,
                         modality=modality,
+                        background_noise_file=background_noise_file,
+                        burst_noise_files=burst_noise_files,
                     )
                 elif user_utterance.startswith("dtmf:"):
                     response = self.sessions_client.run(
@@ -501,6 +440,8 @@ class SimulationEvals(Apps):
                         dtmf=user_utterance.removeprefix("dtmf:").strip(),
                         variables=variables,
                         modality=modality,
+                        background_noise_file=background_noise_file,
+                        burst_noise_files=burst_noise_files,
                     )
                 else:
                     response = self.sessions_client.run(
@@ -508,6 +449,8 @@ class SimulationEvals(Apps):
                         text=user_utterance,
                         variables=variables,
                         modality=modality,
+                        background_noise_file=background_noise_file,
+                        burst_noise_files=burst_noise_files,
                     )
                 break
             except Exception as e:
@@ -541,6 +484,8 @@ class SimulationEvals(Apps):
         session_id: Optional[str] = None,
         console_logging: bool = True,
         modality: str = "text",
+        background_noise_file: Optional[str] = None,
+        burst_noise_files: Optional[List[str]] = None,
     ) -> LLMUserConversation:
         """Runs the simulated conversation loop.
 
@@ -565,13 +510,22 @@ class SimulationEvals(Apps):
 
         # Initialize the first turn manually
         user_utterance, variables = eval_conv.next_user_utterance()
+        accumulated_variables = {}
+        if variables:
+            accumulated_variables.update(variables)
 
         detailed_trace = []
         detailed_trace.append(f"User: {user_utterance}")
 
         while user_utterance:
             response = self._send_request_with_retry(
-                session_id, user_utterance, variables, modality, console_logging
+                session_id,
+                user_utterance,
+                accumulated_variables,
+                modality,
+                console_logging,
+                background_noise_file,
+                burst_noise_files,
             )
             if not response:
                 break
@@ -585,6 +539,8 @@ class SimulationEvals(Apps):
             detailed_trace.append("\n".join(trace_chunks))
 
             if session_ended:
+                if agent_text:
+                    eval_conv._add_agent_response(agent_text)
                 if console_logging:
                     print(
                         "\nSession has been closed by the Agent via "
@@ -597,6 +553,8 @@ class SimulationEvals(Apps):
             user_utterance, variables = eval_conv.next_user_utterance(
                 agent_text
             )
+            if variables:
+                accumulated_variables.update(variables)
             if user_utterance:
                 detailed_trace.append(f"User: {user_utterance}")
 
@@ -628,6 +586,8 @@ class SimulationEvals(Apps):
         modality: str,
         verbose: bool,
         parallel: int,
+        background_noise_file: Optional[str] = None,
+        burst_noise_files: Optional[List[str]] = None,
     ) -> Dict[str, Any]:
         """Runs a single simulation job and returns the results."""
         name = tc["name"]
@@ -642,6 +602,8 @@ class SimulationEvals(Apps):
                 session_id=session_id,
                 console_logging=verbose and parallel <= 1,
                 modality=modality,
+                background_noise_file=background_noise_file,
+                burst_noise_files=burst_noise_files,
             )
             duration_s = round(time.time() - _start, 1)
 
@@ -718,6 +680,8 @@ class SimulationEvals(Apps):
         model: str,
         modality: str,
         verbose: bool,
+        background_noise_file: Optional[str] = None,
+        burst_noise_files: Optional[List[str]] = None,
     ) -> List[Dict[str, Any]]:
         """Aggregates results from multiple simulation jobs."""
         results = []
@@ -735,6 +699,8 @@ class SimulationEvals(Apps):
                             modality,
                             verbose,
                             parallel,
+                            background_noise_file,
+                            burst_noise_files,
                         )
                     )
                     progress.update(task_id, advance=1)
@@ -751,6 +717,8 @@ class SimulationEvals(Apps):
                             modality,
                             verbose,
                             parallel,
+                            background_noise_file,
+                            burst_noise_files,
                         ): (tc["name"], run_idx)
                         for tc, run_idx in jobs
                     }
@@ -768,6 +736,8 @@ class SimulationEvals(Apps):
         model: str = _DEFAULT_GEMINI_MODEL,
         modality: str = "text",
         verbose: bool = False,
+        background_noise_file: Optional[str] = None,
+        burst_noise_files: Optional[List[str]] = None,
     ) -> List[Dict[str, Any]]:
         """Runs multiple simulations, optionally in parallel.
 
@@ -781,7 +751,14 @@ class SimulationEvals(Apps):
         """
         jobs = self._prepare_simulation_jobs(test_cases, runs)
         return self._aggregate_simulation_results(
-            jobs, runs, parallel, model, modality, verbose
+            jobs,
+            runs,
+            parallel,
+            model,
+            modality,
+            verbose,
+            background_noise_file,
+            burst_noise_files,
         )
 
     def _add_agent_text(self, turn: Turn, text: str) -> None:
